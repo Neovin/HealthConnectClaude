@@ -66,7 +66,14 @@ function store(env: Env): DurableObjectStub<HealthStore> {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, rawEnv: Env): Promise<Response> {
+    // Quita espacios o saltos de línea que se cuelan al pegar los secretos en GitHub.
+    const env: Env = {
+      ...rawEnv,
+      API_SECRET: (rawEnv.API_SECRET ?? "").trim(),
+      MCP_SECRET: (rawEnv.MCP_SECRET ?? "").trim(),
+      MCP_TOKEN: (rawEnv.MCP_TOKEN ?? "").trim(),
+    };
     for (const name of ["API_SECRET", "MCP_SECRET", "MCP_TOKEN"] as const) {
       if (!env[name] || env[name].length < MIN_SECRET) {
         return new Response(`${name} no configurado (mínimo ${MIN_SECRET} caracteres)`, { status: 500 });
@@ -85,9 +92,15 @@ export default {
 
     // Endpoint MCP: /mcp/<MCP_SECRET> + cabecera X-API-Key. Hacen falta las dos para leer datos.
     const m = path.match(/^\/mcp\/([^/]+)$/);
-    if (m && safeEqual(decodeURIComponent(m[1]), env.MCP_SECRET)) {
+    let urlSecret = "";
+    try {
+      urlSecret = m ? decodeURIComponent(m[1]).trim() : "";
+    } catch {
+      urlSecret = "";
+    }
+    if (m && safeEqual(urlSecret, env.MCP_SECRET)) {
       // Cabecera X-API-Key (nombre admitido por los conectores de Claude); se acepta también X-MCP-Token.
-      const token = request.headers.get("X-API-Key") ?? request.headers.get("X-MCP-Token") ?? "";
+      const token = (request.headers.get("X-API-Key") ?? request.headers.get("X-MCP-Token") ?? "").trim();
       if (!safeEqual(token, env.MCP_TOKEN)) return new Response("Unauthorized", { status: 401 });
       return handleMcp(request, store(env));
     }
