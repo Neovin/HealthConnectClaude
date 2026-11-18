@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ["android/**"]
+    paths: ["android/**", ".github/workflows/build-apk.yml"]
 
 permissions:
   contents: write

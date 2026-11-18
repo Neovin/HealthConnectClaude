@@ -43,14 +43,14 @@ import java.time.ZoneId
 import java.time.ZoneOffset
 import kotlin.reflect.KClass
 
-/** Legge i dati da Health Connect e li converte nel formato JSON atteso dal server. */
+/** Lee los datos de Health Connect y los convierte al formato JSON que espera el servidor. */
 class HealthReader(private val client: HealthConnectClient) {
 
     companion object {
         const val PERMISSION_BACKGROUND = "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
         const val PERMISSION_HISTORY = "android.permission.health.READ_HEALTH_DATA_HISTORY"
 
-        /** Tipi letti come record singoli (gli altri sono coperti dai totali giornalieri). */
+        /** Tipos leídos como registros individuales (el resto lo cubren los totales diarios). */
         val RAW_TYPES: List<Pair<String, KClass<out Record>>> = listOf(
             "ExerciseSession" to ExerciseSessionRecord::class,
             "SleepSession" to SleepSessionRecord::class,
@@ -152,8 +152,14 @@ class HealthReader(private val client: HealthConnectClient) {
         return out
     }
 
-    /** Legge tutti i record grezzi per cui c'è permesso. */
-    suspend fun readRawRecords(granted: Set<String>, from: Instant, to: Instant, log: (String) -> Unit): List<JSONObject> {
+    /**
+     * Lee todos los registros brutos para los que hay permiso.
+     * Con [failFast] un error de lectura se propaga (para reintentar ese tramo más tarde)
+     * en lugar de omitir ese tipo de dato.
+     */
+    suspend fun readRawRecords(
+        granted: Set<String>, from: Instant, to: Instant, log: (String) -> Unit, failFast: Boolean = false,
+    ): List<JSONObject> {
         val out = mutableListOf<JSONObject>()
         for ((name, type) in RAW_TYPES) {
             if (perm(type) !in granted) continue
@@ -161,8 +167,11 @@ class HealthReader(private val client: HealthConnectClient) {
                 val records = readAll(type, from, to)
                 for (r in records) toJson(r, granted)?.let { out += it }
                 if (records.isNotEmpty()) log("$name: ${records.size}")
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
-                log("$name: errore ${e.message}")
+                log("$name: error ${e.message}")
+                if (failFast) throw e
             }
         }
         return out
@@ -197,7 +206,7 @@ class HealthReader(private val client: HealthConnectClient) {
                 .putOpt("notes", r.notes)
             if (stageMinutes.isNotEmpty()) data.put("stage_minutes", JSONObject(stageMinutes as Map<*, *>))
             if (stages.length() > 0) data.put("stages", stages)
-            // La notte viene attribuita al giorno del risveglio.
+            // La noche se asigna al día en que te despiertas.
             envelope("SleepSession", r, r.startTime, r.endTime, localDate(r.endTime, r.endZoneOffset), data)
         }
 
@@ -259,7 +268,7 @@ class HealthReader(private val client: HealthConnectClient) {
     private fun instant(type: String, r: Record, time: Instant, offset: ZoneOffset?, data: JSONObject) =
         envelope(type, r, time, null, localDate(time, offset), data)
 
-    /** Aggiunge distanza, calorie, passi e FC misurati durante un allenamento. */
+    /** Añade distancia, calorías, pasos y FC medidos durante un entrenamiento. */
     private suspend fun sessionStats(start: Instant, end: Instant, granted: Set<String>, data: JSONObject) {
         val metrics = mutableSetOf<AggregateMetric<*>>()
         if (perm(DistanceRecord::class) in granted) metrics += DistanceRecord.DISTANCE_TOTAL
@@ -277,8 +286,10 @@ class HealthReader(private val client: HealthConnectClient) {
             data.putOpt("steps", res[StepsRecord.COUNT_TOTAL])
             data.putOpt("hr_avg", res[HeartRateRecord.BPM_AVG])
             data.putOpt("hr_max", res[HeartRateRecord.BPM_MAX])
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (_: Exception) {
-            // Statistiche opzionali: se Health Connect rifiuta (es. limite di richieste), si prosegue.
+            // Estadísticas opcionales: si Health Connect las rechaza (p. ej. límite de peticiones), se continúa.
         }
     }
 
@@ -308,14 +319,20 @@ class HealthReader(private val client: HealthConnectClient) {
     )
 
     /**
-     * Totali giornalieri calcolati da Health Connect (deduplicati tra le app secondo
-     * le priorità impostate dall'utente), dal giorno [fromDate] a oggi incluso.
+     * Totales diarios calculados por Health Connect (deduplicados entre apps según
+     * las prioridades del usuario), desde [fromDate] incluido hasta [toDateExclusive] (por defecto, hasta hoy incluido).
      */
-    suspend fun readDailySummaries(granted: Set<String>, fromDate: LocalDate, log: (String) -> Unit): List<JSONObject> {
+    suspend fun readDailySummaries(
+        granted: Set<String>,
+        fromDate: LocalDate,
+        log: (String) -> Unit,
+        toDateExclusive: LocalDate = LocalDate.now().plusDays(1),
+        failFast: Boolean = false,
+    ): List<JSONObject> {
         val metrics = dailyMetrics.filter { perm(it.type) in granted }
         if (metrics.isEmpty()) return emptyList()
         val out = mutableListOf<JSONObject>()
-        val endExclusive = LocalDate.now().plusDays(1)
+        val endExclusive = toDateExclusive
         var chunkStart = fromDate
         while (chunkStart < endExclusive) {
             val chunkEnd = minOf(chunkStart.plusDays(31), endExclusive)
@@ -339,12 +356,15 @@ class HealthReader(private val client: HealthConnectClient) {
                         .put("date", date.toString())
                         .put("data", data)
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
-                log("Totali giornalieri $chunkStart: errore ${e.message}")
+                log("Totales diarios $chunkStart: error ${e.message}")
+                if (failFast) throw e
             }
             chunkStart = chunkEnd
         }
-        log("Giorni con totali: ${out.size}")
+        log("Días con totales: ${out.size}")
         return out
     }
 }

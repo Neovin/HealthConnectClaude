@@ -1,18 +1,18 @@
 import type { HealthStore, QueryOptions, StoredRecord } from "./store";
 
 /**
- * Implementazione minimale e stateless del trasporto MCP "Streamable HTTP":
- * ogni POST contiene uno o più messaggi JSON-RPC e riceve la risposta in JSON.
+ * Implementación mínima y sin estado del transporte MCP "Streamable HTTP":
+ * cada POST contiene uno o varios mensajes JSON-RPC y recibe la respuesta en JSON.
  */
 
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const LATEST_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
 
-const SERVER_INSTRUCTIONS = `Questo server espone i dati di salute e fitness dell'utente, sincronizzati da Android Health Connect.
-- Inizia con get_overview per sapere quali dati esistono e l'intervallo di date coperto.
-- Per totali giornalieri (passi, distanza, calorie, sonno, frequenza cardiaca, minuti di esercizio) usa get_daily_summary: i valori sono già deduplicati tra le diverse app.
-- Per allenamenti usa get_workouts, per il sonno get_sleep, per tutto il resto get_records.
-- Le date sono giorni locali nel formato YYYY-MM-DD. Distanze in metri, energia in kcal, masse in kg.`;
+const SERVER_INSTRUCTIONS = `Este servidor expone los datos de salud y actividad física del usuario, sincronizados desde Android Health Connect.
+- Empieza con get_overview para saber qué datos existen y qué intervalo de fechas cubren.
+- Para totales diarios (pasos, distancia, calorías, sueño, frecuencia cardíaca, minutos de ejercicio) usa get_daily_summary: los valores ya están deduplicados entre apps.
+- Para entrenamientos usa get_workouts, para el sueño get_sleep y para todo lo demás get_records.
+- Las fechas son días locales en formato YYYY-MM-DD; las horas de inicio y fin de los registros van en UTC. Distancias en metros, energía en kcal, masas en kg.`;
 
 type Json = Record<string, unknown>;
 
@@ -50,21 +50,21 @@ const RECORD_TYPES = [
 const TOOLS = [
   {
     name: "get_overview",
-    title: "Panoramica dati",
+    title: "Resumen de datos",
     description:
-      "Elenca i tipi di dati sanitari disponibili, con numero di record, prima e ultima data, e l'orario dell'ultima sincronizzazione dal telefono.",
+      "Enumera los tipos de datos de salud disponibles, con número de registros, primera y última fecha, y la hora de la última sincronización desde el móvil.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "get_daily_summary",
-    title: "Riepilogo giornaliero",
+    title: "Resumen diario",
     description:
-      "Totali per giorno (deduplicati da Health Connect): passi, distanza (m), calorie attive e totali (kcal), piani saliti, dislivello (m), minuti di esercizio, minuti di sonno, frequenza cardiaca media/min/max, FC a riposo, peso medio, idratazione (L), calorie assunte.",
+      "Totales por día (deduplicados por Health Connect): pasos, distancia (m), calorías activas y totales (kcal), pisos subidos, desnivel (m), minutos de ejercicio, minutos de sueño, frecuencia cardíaca media/mín/máx, FC en reposo, peso medio, hidratación (L), calorías ingeridas.",
     inputSchema: {
       type: "object",
       properties: {
-        start_date: dateProp("Primo giorno incluso (YYYY-MM-DD)"),
-        end_date: dateProp("Ultimo giorno incluso (YYYY-MM-DD)"),
+        start_date: dateProp("Primer día incluido (YYYY-MM-DD)"),
+        end_date: dateProp("Último día incluido (YYYY-MM-DD)"),
       },
       required: ["start_date", "end_date"],
       additionalProperties: false,
@@ -72,15 +72,15 @@ const TOOLS = [
   },
   {
     name: "get_workouts",
-    title: "Allenamenti",
+    title: "Entrenamientos",
     description:
-      "Sessioni di allenamento/esercizio con tipo di attività, durata, e (se disponibili) distanza, calorie, passi e frequenza cardiaca della sessione.",
+      "Sesiones de entrenamiento/ejercicio con tipo de actividad, duración y (si están disponibles) distancia, calorías, pasos y frecuencia cardíaca de la sesión.",
     inputSchema: {
       type: "object",
       properties: {
-        start_date: dateProp("Primo giorno incluso (YYYY-MM-DD)"),
-        end_date: dateProp("Ultimo giorno incluso (YYYY-MM-DD)"),
-        limit: { type: "integer", minimum: 1, maximum: 2000, description: "Numero massimo di risultati (default 200)" },
+        start_date: dateProp("Primer día incluido (YYYY-MM-DD)"),
+        end_date: dateProp("Último día incluido (YYYY-MM-DD)"),
+        limit: { type: "integer", minimum: 1, maximum: 2000, description: "Número máximo de resultados (por defecto 200)" },
       },
       required: ["start_date", "end_date"],
       additionalProperties: false,
@@ -88,15 +88,15 @@ const TOOLS = [
   },
   {
     name: "get_sleep",
-    title: "Sonno",
+    title: "Sueño",
     description:
-      "Sessioni di sonno con orario di inizio/fine, durata e minuti per fase (sveglio, leggero, profondo, REM). La data è quella del risveglio.",
+      "Sesiones de sueño con hora de inicio/fin, duración y minutos por fase (despierto, ligero, profundo, REM). La fecha es la del día en que te despiertas.",
     inputSchema: {
       type: "object",
       properties: {
-        start_date: dateProp("Primo giorno incluso (YYYY-MM-DD)"),
-        end_date: dateProp("Ultimo giorno incluso (YYYY-MM-DD)"),
-        include_stages: { type: "boolean", description: "Includi l'elenco dettagliato delle fasi (default false)" },
+        start_date: dateProp("Primer día incluido (YYYY-MM-DD)"),
+        end_date: dateProp("Último día incluido (YYYY-MM-DD)"),
+        include_stages: { type: "boolean", description: "Incluir la lista detallada de fases (por defecto false)" },
       },
       required: ["start_date", "end_date"],
       additionalProperties: false,
@@ -104,17 +104,17 @@ const TOOLS = [
   },
   {
     name: "get_records",
-    title: "Record per tipo",
+    title: "Registros por tipo",
     description:
-      "Record grezzi di un tipo specifico in un intervallo di date. Tipi: " + RECORD_TYPES.join(", ") + ".",
+      "Registros brutos de un tipo concreto en un intervalo de fechas. Tipos: " + RECORD_TYPES.join(", ") + ".",
     inputSchema: {
       type: "object",
       properties: {
-        type: { type: "string", enum: RECORD_TYPES, description: "Tipo di record" },
-        start_date: dateProp("Primo giorno incluso (YYYY-MM-DD)"),
-        end_date: dateProp("Ultimo giorno incluso (YYYY-MM-DD)"),
-        limit: { type: "integer", minimum: 1, maximum: 2000, description: "Numero massimo di risultati (default 500)" },
-        newest_first: { type: "boolean", description: "Ordina dal più recente (default false)" },
+        type: { type: "string", enum: RECORD_TYPES, description: "Tipo de registro" },
+        start_date: dateProp("Primer día incluido (YYYY-MM-DD)"),
+        end_date: dateProp("Último día incluido (YYYY-MM-DD)"),
+        limit: { type: "integer", minimum: 1, maximum: 2000, description: "Número máximo de resultados (por defecto 500)" },
+        newest_first: { type: "boolean", description: "Ordenar del más reciente al más antiguo (por defecto false)" },
       },
       required: ["type", "start_date", "end_date"],
       additionalProperties: false,
@@ -127,16 +127,16 @@ class ToolError extends Error {}
 function str(args: Json, key: string, required = true): string | undefined {
   const v = args[key];
   if (v === undefined || v === null || v === "") {
-    if (required) throw new ToolError(`Parametro mancante: ${key}`);
+    if (required) throw new ToolError(`Falta el parámetro: ${key}`);
     return undefined;
   }
-  if (typeof v !== "string") throw new ToolError(`Il parametro ${key} deve essere una stringa`);
+  if (typeof v !== "string") throw new ToolError(`El parámetro ${key} debe ser una cadena`);
   return v;
 }
 
 function dateArg(args: Json, key: string): string {
   const v = str(args, key)!;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new ToolError(`${key} deve essere nel formato YYYY-MM-DD`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new ToolError(`${key} debe tener el formato YYYY-MM-DD`);
   return v;
 }
 
@@ -144,7 +144,7 @@ function num(args: Json, key: string): number | undefined {
   const v = args[key];
   if (v === undefined || v === null) return undefined;
   const n = Number(v);
-  if (!Number.isFinite(n)) throw new ToolError(`Il parametro ${key} deve essere un numero`);
+  if (!Number.isFinite(n)) throw new ToolError(`El parámetro ${key} debe ser un número`);
   return n;
 }
 
@@ -204,7 +204,7 @@ async function callTool(store: DurableObjectStub<HealthStore>, name: string, arg
     }
 
     default:
-      throw new ToolError(`Strumento sconosciuto: ${name}`);
+      throw new ToolError(`Herramienta desconocida: ${name}`);
   }
 }
 
@@ -249,7 +249,7 @@ async function handleMessage(
         return reply({ content: [{ type: "text", text: JSON.stringify(result) }], isError: false });
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
-        return reply({ content: [{ type: "text", text: `Errore: ${message}` }], isError: true });
+        return reply({ content: [{ type: "text", text: `Error: ${message}` }], isError: true });
       }
     }
     case "resources/list":
@@ -263,7 +263,7 @@ async function handleMessage(
 
 export async function handleMcp(request: Request, store: DurableObjectStub<HealthStore>): Promise<Response> {
   if (request.method !== "POST") {
-    // Nessuno stream SSE lato server: il client userà solo POST.
+    // Sin stream SSE desde el servidor: el cliente solo usará POST.
     return new Response("Method Not Allowed", { status: 405, headers: { Allow: "POST" } });
   }
   let body: unknown;

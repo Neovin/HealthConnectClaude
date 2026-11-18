@@ -5,13 +5,19 @@ export { HealthStore };
 
 interface Env {
   STORE: DurableObjectNamespace<HealthStore>;
-  /** Segreto condiviso: usato dall'app Android (Bearer) e nell'URL del connettore MCP. */
+  /** Clave de ESCRITURA: la usa la app Android para enviar datos (Authorization: Bearer). */
   API_SECRET: string;
+  /** Clave de LECTURA: va en la URL del conector de Claude (/mcp/<MCP_SECRET>). */
+  MCP_SECRET: string;
+  /** Segundo factor de lectura: el conector debe enviar la cabecera X-MCP-Token con este valor. */
+  MCP_TOKEN: string;
 }
+
+const MIN_SECRET = 16;
 
 const MAX_RECORDS_PER_REQUEST = 5000;
 
-/** Confronto a tempo costante per evitare timing attack sul segreto. */
+/** Comparación en tiempo constante para evitar ataques de temporización sobre el secreto. */
 function safeEqual(a: string, b: string): boolean {
   const ea = new TextEncoder().encode(a);
   const eb = new TextEncoder().encode(b);
@@ -43,12 +49,12 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
   try {
     body = await request.json();
   } catch {
-    return Response.json({ error: "JSON non valido" }, { status: 400 });
+    return Response.json({ error: "JSON no válido" }, { status: 400 });
   }
   const records = Array.isArray(body.records) ? body.records : [];
   const deleted = Array.isArray(body.deleted) ? body.deleted.filter((d): d is string => typeof d === "string") : [];
   if (records.length > MAX_RECORDS_PER_REQUEST) {
-    return Response.json({ error: `Massimo ${MAX_RECORDS_PER_REQUEST} record per richiesta` }, { status: 413 });
+    return Response.json({ error: `Máximo ${MAX_RECORDS_PER_REQUEST} registros por petición` }, { status: 413 });
   }
   const valid = records.filter(isValidRecord);
   const result = await store(env).upsert(valid, deleted);
@@ -61,20 +67,27 @@ function store(env: Env): DurableObjectStub<HealthStore> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (!env.API_SECRET || env.API_SECRET.length < 16) {
-      return new Response("API_SECRET non configurato (minimo 16 caratteri)", { status: 500 });
+    for (const name of ["API_SECRET", "MCP_SECRET", "MCP_TOKEN"] as const) {
+      if (!env[name] || env[name].length < MIN_SECRET) {
+        return new Response(`${name} no configurado (mínimo ${MIN_SECRET} caracteres)`, { status: 500 });
+      }
+    }
+    if (env.MCP_SECRET === env.API_SECRET || env.MCP_TOKEN === env.API_SECRET || env.MCP_TOKEN === env.MCP_SECRET) {
+      return new Response("API_SECRET, MCP_SECRET y MCP_TOKEN deben ser distintos", { status: 500 });
     }
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "");
 
     if (path === "" || path === "/") {
-      return new Response("Health Connect MCP server attivo.", { headers: { "content-type": "text/plain" } });
+      return new Response("Servidor MCP de Health Connect activo.", { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
     if (path === "/ingest") return handleIngest(request, env);
 
-    // Endpoint MCP: /mcp/<API_SECRET>. Il segreto nell'URL fa da autenticazione per il connettore Claude.
+    // Endpoint MCP: /mcp/<MCP_SECRET> + cabecera X-MCP-Token. Hacen falta las dos para leer datos.
     const m = path.match(/^\/mcp\/([^/]+)$/);
-    if (m && safeEqual(decodeURIComponent(m[1]), env.API_SECRET)) {
+    if (m && safeEqual(decodeURIComponent(m[1]), env.MCP_SECRET)) {
+      const token = request.headers.get("X-MCP-Token") ?? "";
+      if (!safeEqual(token, env.MCP_TOKEN)) return new Response("Unauthorized", { status: 401 });
       return handleMcp(request, store(env));
     }
     return new Response("Not Found", { status: 404 });
