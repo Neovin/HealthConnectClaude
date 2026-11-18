@@ -65,6 +65,26 @@ function store(env: Env): DurableObjectStub<HealthStore> {
   return env.STORE.get(env.STORE.idFromName("main"));
 }
 
+function decodeSafe(v: string): string {
+  try {
+    return decodeURIComponent(v).trim();
+  } catch {
+    return "";
+  }
+}
+
+/** Endpoint MCP: /mcp/<MCP_SECRET> + cabecera X-API-Key. Hacen falta las dos para leer datos. */
+async function route(request: Request, env: Env, path: string): Promise<Response> {
+  const m = path.match(/^\/mcp\/([^/]+)$/);
+  if (m && safeEqual(decodeSafe(m[1]), env.MCP_SECRET)) {
+    // Cabecera X-API-Key (nombre admitido por los conectores de Claude); se acepta también X-MCP-Token.
+    const token = (request.headers.get("X-API-Key") ?? request.headers.get("X-MCP-Token") ?? "").trim();
+    if (!safeEqual(token, env.MCP_TOKEN)) return new Response("Unauthorized", { status: 401 });
+    return handleMcp(request, store(env));
+  }
+  return new Response("Not Found", { status: 404 });
+}
+
 export default {
   async fetch(request: Request, rawEnv: Env): Promise<Response> {
     // Quita espacios o saltos de línea que se cuelan al pegar los secretos en GitHub.
@@ -90,6 +110,42 @@ export default {
     }
     if (path === "/ingest") return handleIngest(request, env);
 
+    // Diagnóstico temporal: últimas peticiones recibidas (sin valores de secretos).
+    if (path === "/comprobar-peticiones") {
+      const list = JSON.parse(await store(env).recentRequests()) as unknown[];
+      return new Response(JSON.stringify(list.reverse(), null, 1), {
+        headers: { "content-type": "application/json; charset=utf-8" },
+      });
+    }
+    if (path !== "/comprobar" && !path.startsWith("/comprobar/") && path !== "/favicon.ico") {
+      const copy = request.method === "POST" ? request.clone() : null;
+      const res = await route(request, env, path);
+      const hdrs = [...request.headers.keys()].filter((k) => !k.startsWith("cf-") && k !== "cookie");
+      const apiKey = (request.headers.get("X-API-Key") ?? "").trim();
+      let rpc = "";
+      if (request.method === "POST") {
+        try {
+          const body = (await copy!.json()) as { method?: string } | { method?: string }[];
+          rpc = Array.isArray(body) ? body.map((m) => m.method).join(",") : body.method ?? "";
+        } catch {
+          rpc = "(no JSON)";
+        }
+      }
+      await store(env).logRequest(JSON.stringify({
+        at: new Date().toISOString(),
+        method: request.method,
+        ruta: path.startsWith("/mcp/")
+          ? "/mcp/<secreto " + (safeEqual(decodeSafe(path.slice(5)), env.MCP_SECRET) ? "OK" : "INCORRECTO") + ">"
+          : path.replace(/[A-Za-z0-9%_-]{16,}/g, "<valor oculto>"),
+        x_api_key: apiKey ? (safeEqual(apiKey, env.MCP_TOKEN) ? "OK" : `INCORRECTA (longitud ${apiKey.length})`) : "AUSENTE",
+        cabeceras: hdrs,
+        rpc,
+        status: res.status,
+        ua: request.headers.get("user-agent") ?? "",
+      }));
+      return res;
+    }
+
     // Diagnóstico temporal: /comprobar/<valor> dice con qué secreto coincide el valor (sin revelarlos).
     const chk = path.match(/^\/comprobar\/([^/]+)$/);
     if (chk) {
@@ -107,20 +163,6 @@ export default {
       return new Response(text, { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
 
-    // Endpoint MCP: /mcp/<MCP_SECRET> + cabecera X-API-Key. Hacen falta las dos para leer datos.
-    const m = path.match(/^\/mcp\/([^/]+)$/);
-    let urlSecret = "";
-    try {
-      urlSecret = m ? decodeURIComponent(m[1]).trim() : "";
-    } catch {
-      urlSecret = "";
-    }
-    if (m && safeEqual(urlSecret, env.MCP_SECRET)) {
-      // Cabecera X-API-Key (nombre admitido por los conectores de Claude); se acepta también X-MCP-Token.
-      const token = (request.headers.get("X-API-Key") ?? request.headers.get("X-MCP-Token") ?? "").trim();
-      if (!safeEqual(token, env.MCP_TOKEN)) return new Response("Unauthorized", { status: 401 });
-      return handleMcp(request, store(env));
-    }
     return new Response("Not Found", { status: 404 });
   },
 } satisfies ExportedHandler<Env>;

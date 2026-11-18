@@ -220,6 +220,18 @@ export class HealthStore extends DurableObject {
     return JSON.stringify(rows);
   }
 
+  /** Diagnóstico: guarda un resumen (sin secretos) de las últimas peticiones al endpoint MCP. */
+  async logRequest(entryJson: string): Promise<void> {
+    const entry = JSON.parse(entryJson) as Record<string, unknown>;
+    const list = ((await this.ctx.storage.get<Record<string, unknown>[]>("debug_requests")) ?? []).slice(-29);
+    list.push(entry);
+    await this.ctx.storage.put("debug_requests", list);
+  }
+
+  async recentRequests(): Promise<string> {
+    return JSON.stringify((await this.ctx.storage.get<Record<string, unknown>[]>("debug_requests")) ?? []);
+  }
+
   async overview(): Promise<{
     last_sync: string | null;
     types: { type: string; count: number; first_date: string; last_date: string }[];
