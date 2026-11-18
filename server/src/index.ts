@@ -9,7 +9,7 @@ interface Env {
   API_SECRET: string;
   /** Clave de LECTURA: va en la URL del conector de Claude (/mcp/<MCP_SECRET>). */
   MCP_SECRET: string;
-  /** Segundo factor de lectura: el conector debe enviar la cabecera X-MCP-Token con este valor. */
+  /** Segundo factor de lectura: el conector debe enviar la cabecera X-API-Key con este valor. */
   MCP_TOKEN: string;
 }
 
@@ -83,10 +83,11 @@ export default {
     }
     if (path === "/ingest") return handleIngest(request, env);
 
-    // Endpoint MCP: /mcp/<MCP_SECRET> + cabecera X-MCP-Token. Hacen falta las dos para leer datos.
+    // Endpoint MCP: /mcp/<MCP_SECRET> + cabecera X-API-Key. Hacen falta las dos para leer datos.
     const m = path.match(/^\/mcp\/([^/]+)$/);
     if (m && safeEqual(decodeURIComponent(m[1]), env.MCP_SECRET)) {
-      const token = request.headers.get("X-MCP-Token") ?? "";
+      // Cabecera X-API-Key (nombre admitido por los conectores de Claude); se acepta también X-MCP-Token.
+      const token = request.headers.get("X-API-Key") ?? request.headers.get("X-MCP-Token") ?? "";
       if (!safeEqual(token, env.MCP_TOKEN)) return new Response("Unauthorized", { status: 401 });
       return handleMcp(request, store(env));
     }
