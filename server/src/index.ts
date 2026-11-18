@@ -65,6 +65,22 @@ function store(env: Env): DurableObjectStub<HealthStore> {
   return env.STORE.get(env.STORE.idFromName("main"));
 }
 
+/** Describe un valor recibido sin revelarlo: si es el esperado, otro secreto, o nada (con longitud y tipo de caracteres). */
+function describe(v: string, env: Env, expected: "MCP_SECRET" | "MCP_TOKEN"): string {
+  if (safeEqual(v, env[expected])) return `${expected} OK`;
+  for (const n of ["API_SECRET", "MCP_SECRET", "MCP_TOKEN"] as const) {
+    if (safeEqual(v, env[n])) return `INCORRECTO: es tu ${n}`;
+  }
+  const raro = v.replace(/[A-Za-z0-9]/g, "");
+  const ini = v.slice(0, 2);
+  const fin = v.slice(-2);
+  const espIni = env[expected].slice(0, 2);
+  const espFin = env[expected].slice(-2);
+  return `INCORRECTO: longitud ${v.length} (esperada ${env[expected].length})` +
+    (raro ? `, contiene caracteres no alfanuméricos: ${JSON.stringify([...new Set(raro)].join(""))}` : "") +
+    `, empieza ${ini === espIni ? "igual" : "distinto"}, termina ${fin === espFin ? "igual" : "distinto"}`;
+}
+
 function decodeSafe(v: string): string {
   try {
     return decodeURIComponent(v).trim();
@@ -134,10 +150,9 @@ export default {
       await store(env).logRequest(JSON.stringify({
         at: new Date().toISOString(),
         method: request.method,
-        ruta: path.startsWith("/mcp/")
-          ? "/mcp/<secreto " + (safeEqual(decodeSafe(path.slice(5)), env.MCP_SECRET) ? "OK" : "INCORRECTO") + ">"
+        ruta: path.startsWith("/mcp/") ? "/mcp/<" + describe(decodeSafe(path.slice(5)), env, "MCP_SECRET") + ">"
           : path.replace(/[A-Za-z0-9%_-]{16,}/g, "<valor oculto>"),
-        x_api_key: apiKey ? (safeEqual(apiKey, env.MCP_TOKEN) ? "OK" : `INCORRECTA (longitud ${apiKey.length})`) : "AUSENTE",
+        x_api_key: apiKey ? describe(apiKey, env, "MCP_TOKEN") : "AUSENTE",
         cabeceras: hdrs,
         rpc,
         status: res.status,
