@@ -90,6 +90,23 @@ export default {
     }
     if (path === "/ingest") return handleIngest(request, env);
 
+    // Diagnóstico temporal: /comprobar/<valor> dice con qué secreto coincide el valor (sin revelarlos).
+    const chk = path.match(/^\/comprobar\/([^/]+)$/);
+    if (chk) {
+      let v = "";
+      try {
+        v = decodeURIComponent(chk[1]).trim();
+      } catch {
+        v = "";
+      }
+      const hits = (["API_SECRET", "MCP_SECRET", "MCP_TOKEN"] as const).filter((n) => safeEqual(v, env[n]));
+      const text = hits.length
+        ? `El valor coincide con: ${hits.join(", ")}`
+        : `No coincide con ningún secreto. Longitud de tu valor: ${v.length}. ` +
+          `Longitudes guardadas: API_SECRET ${env.API_SECRET.length}, MCP_SECRET ${env.MCP_SECRET.length}, MCP_TOKEN ${env.MCP_TOKEN.length}.`;
+      return new Response(text, { headers: { "content-type": "text/plain; charset=utf-8" } });
+    }
+
     // Endpoint MCP: /mcp/<MCP_SECRET> + cabecera X-API-Key. Hacen falta las dos para leer datos.
     const m = path.match(/^\/mcp\/([^/]+)$/);
     let urlSecret = "";
