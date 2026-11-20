@@ -163,7 +163,7 @@ function metros(a: number[], b: number[]): number {
 }
 
 /** Prepara una ruta para Claude: km acumulados, pulso por punto, parciales por km y recorrido reducido. */
-function detalleRuta(r: any, maxPoints: number, conPuntos: boolean): Json {
+export function detalleRuta(r: any, maxPoints: number, conPuntos: boolean): Json {
   const pts: number[][] = r.points;
   const hr: { t: number; bpm: number }[] = (r.heart_rate ?? []).sort((a: any, b: any) => a.t - b.t);
   const pulsoEn = (t: number): number | undefined => {

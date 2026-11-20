@@ -1,4 +1,4 @@
-import { handleMcp } from "./mcp";
+import { detalleRuta, handleMcp } from "./mcp";
 import { HealthStore, type IncomingRecord, type IncomingRoute } from "./store";
 
 export { HealthStore };
@@ -78,10 +78,23 @@ function isValidRoute(r: unknown): r is IncomingRoute {
 }
 
 /** Rutas GPS (de Strava o grabadas por la app Entreno). Misma clave de escritura que /ingest. */
-async function handleRoutes(request: Request, env: Env): Promise<Response> {
-  if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
+async function handleRoutes(request: Request, env: Env, id?: string): Promise<Response> {
   const auth = request.headers.get("Authorization") ?? "";
   if (!safeEqual(auth, `Bearer ${env.API_SECRET}`)) return new Response("Unauthorized", { status: 401 });
+  // Lectura para la app Entreno (misma clave): lista o detalle de una ruta
+  if (request.method === "GET") {
+    const url = new URL(request.url);
+    if (id) {
+      const r = JSON.parse(await store(env).getRoute(id));
+      if (!r) return Response.json({ error: "No existe" }, { status: 404 });
+      const max = Math.min(3000, Math.max(20, Number(url.searchParams.get("max_points")) || 800));
+      return Response.json(detalleRuta(r, max, true));
+    }
+    const from = url.searchParams.get("from") ?? "2000-01-01";
+    const to = url.searchParams.get("to") ?? "2999-12-31";
+    return new Response(await store(env).listRoutes(from, to), { headers: { "content-type": "application/json" } });
+  }
+  if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
   let body: { routes?: unknown[]; deleted?: unknown[] };
   try {
     body = await request.json();
@@ -127,6 +140,8 @@ export default {
     }
     if (path === "/ingest") return handleIngest(request, env);
     if (path === "/routes") return handleRoutes(request, env);
+    const mr = path.match(/^\/routes\/([^/]+)$/);
+    if (mr) return handleRoutes(request, env, decodeURIComponent(mr[1]));
 
     // Endpoint MCP: /mcp/<MCP_SECRET> + cabecera X-API-Key. Hacen falta las dos para leer datos.
     const m = path.match(/^\/mcp\/([^/]+)$/);

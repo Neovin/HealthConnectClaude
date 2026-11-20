@@ -235,6 +235,8 @@ export class HealthStore extends DurableObject {
         `INSERT INTO meta (key, value) VALUES ('last_sync', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
         new Date(now).toISOString(),
       );
+      // Rutas que llegaron antes que su sesión del reloj: se enlazan ahora
+      if (records.some((r) => r.type === "ExerciseSession")) this.enlazarPendientes();
     });
     return { upserted, deleted };
   }
@@ -306,6 +308,22 @@ export class HealthStore extends DurableObject {
       if (sol >= 0.5 * Math.min(a1 - a0, b1 - b0) && (!mejor || sol > mejor.sol)) mejor = { id: r.id, sol };
     }
     return mejor?.id ?? null;
+  }
+
+  /** Enlaza las rutas sin sesión con la ExerciseSession que coincide en hora, si ya existe. */
+  private enlazarPendientes(): number {
+    if (!this.sql.exec(`SELECT 1 FROM sqlite_master WHERE name = 'routes'`).toArray().length) return 0;
+    const pend = this.sql
+      .exec<{ id: string; start_time: string; end_time: string; local_date: string }>(
+        `SELECT id, start_time, end_time, local_date FROM routes WHERE session_id IS NULL`,
+      )
+      .toArray();
+    let n = 0;
+    for (const r of pend) {
+      const s = this.sesionDe(r.start_time, r.end_time, r.local_date);
+      if (s) { this.sql.exec(`UPDATE routes SET session_id = ? WHERE id = ?`, s, r.id); n++; }
+    }
+    return n;
   }
 
   async upsertRoutes(routes: IncomingRoute[], deletedIds: string[] = []): Promise<{ upserted: number; deleted: number; linked: number }> {
