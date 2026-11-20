@@ -35,6 +35,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var statusText: TextView
     private lateinit var historyText: TextView
     private lateinit var logText: TextView
+    private lateinit var stravaText: TextView
     private lateinit var permissionLauncher: ActivityResultLauncher<Set<String>>
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -61,10 +62,36 @@ class MainActivity : ComponentActivity() {
             Syncer.resumeHistoryIfPending(this)
         }
 
+        manejarStrava(intent)
+
         // Actualiza la pantalla cada vez que la carga del historial avanza.
         WorkManager.getInstance(this)
             .getWorkInfosForUniqueWorkLiveData(Syncer.HISTORY_WORK)
             .observe(this) { refresh() }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        manejarStrava(intent)
+    }
+
+    /** Si la app se abre desde Strava tras dar permiso, lanza la importación de rutas. */
+    private fun manejarStrava(intent: Intent?) {
+        val uri = intent?.data ?: return
+        if (uri.scheme != "hcclaude") return
+        val code = StravaImport.codigoDe(uri)
+        if (code == null) {
+            stravaText.text = "Strava no ha dado permiso (${uri.getQueryParameter("error") ?: "cancelado"})."
+            return
+        }
+        stravaText.text = ""
+        lifecycleScope.launch {
+            val r = try {
+                StravaImport.importar(this@MainActivity, code) { line -> runOnUiThread { stravaText.append(line + "\n") } }
+            } catch (e: Exception) { "Error: ${e.message}" }
+            stravaText.append(r + "\n")
+        }
+        setIntent(Intent(this, MainActivity::class.java))
     }
 
     override fun onResume() {
@@ -131,6 +158,32 @@ class MainActivity : ComponentActivity() {
         statusText = label("")
         historyText = label("")
         logText = label("", 12f)
+
+        // ------------------------------------------------ importación puntual de rutas de Strava
+        label("Rutas de Strava (importación única)", 18f)
+        label("Client ID y Client Secret de tu aplicación de la API de Strava (strava.com/settings/api, con «localhost» como dominio de autorización). Importa las salidas en bici y las caminatas de 8 km o más.", 12f)
+        val stravaId = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            hint = "Client ID"
+            setText(StravaImport.clientId(this@MainActivity))
+        }.also { root.addView(it) }
+        val stravaSecret = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            hint = "Client Secret"
+            setText(StravaImport.clientSecret(this@MainActivity))
+        }.also { root.addView(it) }
+        button("Importar rutas de Strava") {
+            if (!prefs.isConfigured) return@button toast("Primero guarda la URL del servidor y el secreto")
+            if (stravaId.text.isBlank() || stravaSecret.text.isBlank()) return@button toast("Falta el Client ID o el Client Secret")
+            StravaImport.guardar(this, stravaId.text.toString(), stravaSecret.text.toString())
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(StravaImport.urlPermiso(this))))
+        }
+        button("Olvidar claves de Strava") {
+            StravaImport.borrar(this)
+            stravaId.setText(""); stravaSecret.setText("")
+            toast("Claves de Strava borradas del móvil")
+        }
+        stravaText = label("", 12f)
 
         val scroll = ScrollView(this).apply { addView(root) }
         // Android 15+ dibuja la app a pantalla completa: deja sitio a la barra de estado, el notch y el teclado.
