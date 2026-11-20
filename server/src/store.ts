@@ -33,6 +33,51 @@ export interface StoredRecord {
 
 const MAX_LIMIT = 2000;
 
+/** Ruta GPS de una actividad (Strava, la app Entreno…), enlazada a su ExerciseSession por la hora. */
+export interface IncomingRoute {
+  id: string; // p. ej. "strava:21059684346" o "entreno:<uuid>"
+  start: string; // ISO-8601 UTC
+  end: string; // ISO-8601 UTC
+  date: string; // día local YYYY-MM-DD
+  activity?: string | null; // "biking", "walking"…
+  source?: string | null; // "strava", "entreno"…
+  name?: string | null;
+  session_id?: string | null; // id de la ExerciseSession de Health Connect, si ya se conoce
+  distance_m?: number | null;
+  elevation_gain_m?: number | null;
+  points: number[][]; // [segundos desde el inicio, lat, lon, altitud?]
+}
+
+export interface RouteSummary {
+  id: string;
+  session_id: string | null;
+  start: string;
+  end: string;
+  date: string;
+  activity: string | null;
+  source: string | null;
+  name: string | null;
+  distance_m: number;
+  elevation_gain_m: number;
+  n_points: number;
+}
+
+/** Distancia (m) y desnivel positivo (m) de una lista de puntos. */
+export function medirRuta(points: number[][]): { distance_m: number; elevation_gain_m: number } {
+  let d = 0;
+  let sube = 0;
+  const R = 6371000;
+  const rad = Math.PI / 180;
+  for (let i = 1; i < points.length; i++) {
+    const [, la1, lo1, a1] = points[i - 1];
+    const [, la2, lo2, a2] = points[i];
+    const x = Math.sin(((la2 - la1) * rad) / 2) ** 2 + Math.cos(la1 * rad) * Math.cos(la2 * rad) * Math.sin(((lo2 - lo1) * rad) / 2) ** 2;
+    d += 2 * R * Math.asin(Math.sqrt(x));
+    if (a1 != null && a2 != null && a2 > a1) sube += a2 - a1;
+  }
+  return { distance_m: Math.round(d), elevation_gain_m: Math.round(sube) };
+}
+
 /**
  * Durable Object con storage SQLite: contiene tutti i dati sanitari.
  * Esiste una sola istanza (nome "main").
@@ -65,6 +110,26 @@ export class HealthStore extends DurableObject {
         .toArray()
         .map((r) => r.name),
     );
+    if (!existing.has("routes")) {
+      this.sql.exec(`
+        CREATE TABLE IF NOT EXISTS routes (
+          id TEXT PRIMARY KEY,
+          session_id TEXT,
+          start_time TEXT NOT NULL,
+          end_time TEXT NOT NULL,
+          local_date TEXT NOT NULL,
+          activity TEXT,
+          source TEXT,
+          name TEXT,
+          distance_m REAL NOT NULL,
+          elevation_gain_m REAL NOT NULL,
+          n_points INTEGER NOT NULL,
+          points TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_routes_date ON routes(local_date);
+      `);
+    }
     if (!existing.has("records") || !existing.has("idx_type_date") || !existing.has("meta") || !existing.has("type_stats")) {
       this.sql.exec(`
         CREATE TABLE IF NOT EXISTS records (
@@ -220,6 +285,98 @@ export class HealthStore extends DurableObject {
     return JSON.stringify(rows);
   }
 
+  /** Busca la ExerciseSession que coincide en hora con la ruta (más de la mitad solapada). */
+  private sesionDe(start: string, end: string, date: string): string | null {
+    const d = new Date(date + "T12:00:00Z").getTime();
+    const dia = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+    const rows = this.sql
+      .exec<{ id: string; start_time: string; end_time: string | null; source: string | null }>(
+        `SELECT id, start_time, end_time, source FROM records WHERE type = 'ExerciseSession' AND local_date BETWEEN ? AND ?`,
+        dia(d - 86400000), dia(d + 86400000),
+      )
+      .toArray();
+    const a0 = Date.parse(start), a1 = Date.parse(end);
+    let mejor: { id: string; sol: number } | null = null;
+    for (const r of rows) {
+      if (!r.end_time) continue;
+      // Las sesiones que Google Fit detecta solo no cuentan: el usuario solo usa las del reloj
+      if (r.source === "com.google.android.apps.fitness") continue;
+      const b0 = Date.parse(r.start_time), b1 = Date.parse(r.end_time);
+      const sol = Math.max(0, Math.min(a1, b1) - Math.max(a0, b0));
+      if (sol >= 0.5 * Math.min(a1 - a0, b1 - b0) && (!mejor || sol > mejor.sol)) mejor = { id: r.id, sol };
+    }
+    return mejor?.id ?? null;
+  }
+
+  async upsertRoutes(routes: IncomingRoute[], deletedIds: string[] = []): Promise<{ upserted: number; deleted: number; linked: number }> {
+    if (!this.statsReady) this.ensureSchema();
+    const now = Date.now();
+    let upserted = 0, deleted = 0, linked = 0;
+    this.ctx.storage.transactionSync(() => {
+      for (const r of routes) {
+        const medida = medirRuta(r.points);
+        const sesion = r.session_id ?? this.sesionDe(r.start, r.end, r.date);
+        if (sesion) linked++;
+        this.sql.exec(
+          `INSERT INTO routes (id, session_id, start_time, end_time, local_date, activity, source, name, distance_m, elevation_gain_m, n_points, points, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET session_id = excluded.session_id, start_time = excluded.start_time, end_time = excluded.end_time,
+             local_date = excluded.local_date, activity = excluded.activity, source = excluded.source, name = excluded.name,
+             distance_m = excluded.distance_m, elevation_gain_m = excluded.elevation_gain_m, n_points = excluded.n_points,
+             points = excluded.points, updated_at = excluded.updated_at`,
+          r.id, sesion, r.start, r.end, r.date, r.activity ?? null, r.source ?? null, r.name ?? null,
+          r.distance_m ?? medida.distance_m, r.elevation_gain_m ?? medida.elevation_gain_m, r.points.length, JSON.stringify(r.points), now,
+        );
+        upserted++;
+      }
+      for (const id of deletedIds) deleted += this.sql.exec(`DELETE FROM routes WHERE id = ?`, id).rowsWritten > 0 ? 1 : 0;
+    });
+    return { upserted, deleted, linked };
+  }
+
+  /** Lista de rutas sin los puntos (JSON de RouteSummary[]). */
+  async listRoutes(from: string, to: string): Promise<string> {
+    if (!this.sql.exec(`SELECT 1 FROM sqlite_master WHERE name = 'routes'`).toArray().length) return "[]";
+    const rows = this.sql
+      .exec<Record<string, any>>(
+        `SELECT id, session_id, start_time, end_time, local_date, activity, source, name, distance_m, elevation_gain_m, n_points
+         FROM routes WHERE local_date BETWEEN ? AND ? ORDER BY start_time`,
+        from, to,
+      )
+      .toArray()
+      .map((r) => ({
+        id: r.id, session_id: r.session_id, start: r.start_time, end: r.end_time, date: r.local_date, activity: r.activity,
+        source: r.source, name: r.name, distance_m: r.distance_m, elevation_gain_m: r.elevation_gain_m, n_points: r.n_points,
+      }));
+    return JSON.stringify(rows);
+  }
+
+  /** Una ruta con sus puntos, la sesión enlazada y los registros de pulso de ese intervalo (JSON). */
+  async getRoute(id: string): Promise<string> {
+    const r = this.sql.exec<Record<string, any>>(`SELECT * FROM routes WHERE id = ?`, id).toArray()[0];
+    if (!r) return "null";
+    const sesion = r.session_id
+      ? this.sql.exec<{ data: string; source: string | null }>(`SELECT data, source FROM records WHERE id = ?`, r.session_id).toArray()[0]
+      : undefined;
+    const a0 = Date.parse(r.start_time), a1 = Date.parse(r.end_time);
+    const hr = this.sql
+      .exec<{ start_time: string; end_time: string | null; data: string }>(
+        `SELECT start_time, end_time, data FROM records WHERE type = 'HeartRate' AND local_date BETWEEN ? AND ?`,
+        new Date(a0 - 86400000).toISOString().slice(0, 10), new Date(a1 + 86400000).toISOString().slice(0, 10),
+      )
+      .toArray()
+      .map((h) => ({ t0: Date.parse(h.start_time), t1: h.end_time ? Date.parse(h.end_time) : Date.parse(h.start_time), ...JSON.parse(h.data) }))
+      .filter((h) => h.t1 >= a0 && h.t0 <= a1)
+      .map((h) => ({ t: Math.round(((h.t0 + h.t1) / 2 - a0) / 1000), bpm: h.bpm_avg as number }));
+    return JSON.stringify({
+      id: r.id, session_id: r.session_id, start: r.start_time, end: r.end_time, date: r.local_date, activity: r.activity,
+      source: r.source, name: r.name, distance_m: r.distance_m, elevation_gain_m: r.elevation_gain_m,
+      session: sesion ? { source: sesion.source, ...JSON.parse(sesion.data) } : null,
+      points: JSON.parse(r.points) as number[][],
+      heart_rate: hr,
+    });
+  }
+
   async overview(): Promise<{
     last_sync: string | null;
     types: { type: string; count: number; first_date: string; last_date: string }[];
@@ -233,6 +390,14 @@ export class HealthStore extends DurableObject {
       )
       .toArray();
     const meta = this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'last_sync'`).toArray();
+    if (this.sql.exec(`SELECT 1 FROM sqlite_master WHERE name = 'routes'`).toArray().length) {
+      const rt = this.sql
+        .exec<{ count: number; first_date: string | null; last_date: string | null }>(
+          `SELECT COUNT(*) AS count, MIN(local_date) AS first_date, MAX(local_date) AS last_date FROM routes`,
+        )
+        .toArray()[0];
+      if (rt && rt.count > 0) types.push({ type: "Route (rutas GPS: list_routes / get_route)", count: rt.count, first_date: rt.first_date!, last_date: rt.last_date! });
+    }
     return { last_sync: meta[0]?.value ?? null, types };
   }
 }

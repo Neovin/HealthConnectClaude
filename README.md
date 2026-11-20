@@ -23,6 +23,7 @@ Health Connect non ha un'API cloud: i dati stanno solo sul telefono. Per questo 
 | `get_daily_summary` | Totali per giorno (deduplicati tra le app): passi, distanza, calorie attive/totali, piani, dislivello, minuti di esercizio, sonno, FC media/min/max, FC a riposo, peso, idratazione, calorie assunte |
 | `get_workouts` | Allenamenti: tipo, durata, distanza, calorie, passi, FC media/max |
 | `get_sleep` | Sonno: orari, durata, minuti per fase (leggero/profondo/REM/sveglio) |
+| `list_routes` / `get_route` | Percorsi GPS (bici, camminate lunghe) collegati al loro allenamento, con dislivello, parziali per km e frequenza cardiaca lungo il percorso. Si inviano a `POST /routes` con la stessa chiave di `/ingest` |
 | `get_records` | Record grezzi: FC, FC a riposo, HRV, peso, altezza, massa grassa/magra, metabolismo basale, SpO₂, frequenza respiratoria, pressione, glicemia, temperatura, idratazione, alimentazione, VO₂ max |
 
 ## Installazione (si può fare tutto dal telefono)

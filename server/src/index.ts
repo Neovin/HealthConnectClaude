@@ -1,5 +1,5 @@
 import { handleMcp } from "./mcp";
-import { HealthStore, type IncomingRecord } from "./store";
+import { HealthStore, type IncomingRecord, type IncomingRoute } from "./store";
 
 export { HealthStore };
 
@@ -61,6 +61,43 @@ async function handleIngest(request: Request, env: Env): Promise<Response> {
   return Response.json({ ok: true, ...result, rejected: records.length - valid.length });
 }
 
+const MAX_ROUTES_PER_REQUEST = 50;
+const MAX_POINTS_PER_ROUTE = 20000;
+
+function isValidRoute(r: unknown): r is IncomingRoute {
+  if (!r || typeof r !== "object") return false;
+  const o = r as Record<string, unknown>;
+  return (
+    typeof o.id === "string" && o.id.length <= 200 &&
+    typeof o.start === "string" && !Number.isNaN(Date.parse(o.start)) &&
+    typeof o.end === "string" && !Number.isNaN(Date.parse(o.end)) &&
+    typeof o.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(o.date) &&
+    Array.isArray(o.points) && o.points.length >= 2 && o.points.length <= MAX_POINTS_PER_ROUTE &&
+    o.points.every((p) => Array.isArray(p) && p.length >= 3 && p.length <= 4 && p.every((v) => v === null || typeof v === "number"))
+  );
+}
+
+/** Rutas GPS (de Strava o grabadas por la app Entreno). Misma clave de escritura que /ingest. */
+async function handleRoutes(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
+  const auth = request.headers.get("Authorization") ?? "";
+  if (!safeEqual(auth, `Bearer ${env.API_SECRET}`)) return new Response("Unauthorized", { status: 401 });
+  let body: { routes?: unknown[]; deleted?: unknown[] };
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ error: "JSON no válido" }, { status: 400 });
+  }
+  const routes = Array.isArray(body.routes) ? body.routes : [];
+  const deleted = Array.isArray(body.deleted) ? body.deleted.filter((d): d is string => typeof d === "string") : [];
+  if (routes.length > MAX_ROUTES_PER_REQUEST) {
+    return Response.json({ error: `Máximo ${MAX_ROUTES_PER_REQUEST} rutas por petición` }, { status: 413 });
+  }
+  const valid = routes.filter(isValidRoute);
+  const result = await store(env).upsertRoutes(valid, deleted);
+  return Response.json({ ok: true, ...result, rejected: routes.length - valid.length });
+}
+
 function store(env: Env): DurableObjectStub<HealthStore> {
   return env.STORE.get(env.STORE.idFromName("main"));
 }
@@ -89,6 +126,7 @@ export default {
       return new Response("Servidor MCP de Health Connect activo.", { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
     if (path === "/ingest") return handleIngest(request, env);
+    if (path === "/routes") return handleRoutes(request, env);
 
     // Endpoint MCP: /mcp/<MCP_SECRET> + cabecera X-API-Key. Hacen falta las dos para leer datos.
     const m = path.match(/^\/mcp\/([^/]+)$/);

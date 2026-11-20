@@ -12,6 +12,8 @@ const SERVER_INSTRUCTIONS = `Este servidor expone los datos de salud y actividad
 - Empieza con get_overview para saber qué datos existen y qué intervalo de fechas cubren.
 - Para totales diarios (pasos, distancia, calorías, sueño, frecuencia cardíaca, minutos de ejercicio) usa get_daily_summary: los valores ya están deduplicados entre apps.
 - Para entrenamientos usa get_workouts, para el sueño get_sleep y para todo lo demás get_records.
+- Las rutas GPS (salidas en bici y caminatas largas) están en list_routes y get_route; cada ruta va enlazada a su entrenamiento y get_route incluye el pulso a lo largo del recorrido.
+- Las sesiones con source com.google.android.apps.fitness son detecciones automáticas de Google Fit: el usuario no las usa, ignóralas.
 - Las fechas son días locales en formato YYYY-MM-DD; las horas de inicio y fin de los registros van en UTC. Distancias en metros, energía en kcal, masas en kg.`;
 
 type Json = Record<string, unknown>;
@@ -120,7 +122,93 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "list_routes",
+    title: "Rutas GPS",
+    description:
+      "Rutas GPS guardadas (salidas en bici, caminatas largas): fecha, hora, actividad, origen, distancia (m), desnivel positivo (m), número de puntos y el id de la sesión de entrenamiento enlazada. Usa get_route para el detalle de una.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        start_date: dateProp("Primer día incluido (YYYY-MM-DD)"),
+        end_date: dateProp("Último día incluido (YYYY-MM-DD)"),
+      },
+      required: ["start_date", "end_date"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_route",
+    title: "Detalle de una ruta",
+    description:
+      "Una ruta GPS con su recorrido (puntos con segundos desde el inicio, lat, lon, altitud, km acumulados y pulso cuando lo hay), parciales por kilómetro (tiempo, desnivel, pulso medio) y el resumen del entrenamiento enlazado.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "id de la ruta (de list_routes)" },
+        max_points: { type: "integer", minimum: 20, maximum: 3000, description: "Puntos del recorrido a devolver (por defecto 300; se reduce de forma uniforme)" },
+        include_points: { type: "boolean", description: "Incluir el recorrido punto a punto (por defecto true). Con false solo resumen y parciales." },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
 ].map((t) => ({ ...t, annotations: { readOnlyHint: true, openWorldHint: false } }));
+
+const R_TIERRA = 6371000;
+function metros(a: number[], b: number[]): number {
+  const r = Math.PI / 180;
+  const x = Math.sin(((b[1] - a[1]) * r) / 2) ** 2 + Math.cos(a[1] * r) * Math.cos(b[1] * r) * Math.sin(((b[2] - a[2]) * r) / 2) ** 2;
+  return 2 * R_TIERRA * Math.asin(Math.sqrt(x));
+}
+
+/** Prepara una ruta para Claude: km acumulados, pulso por punto, parciales por km y recorrido reducido. */
+function detalleRuta(r: any, maxPoints: number, conPuntos: boolean): Json {
+  const pts: number[][] = r.points;
+  const hr: { t: number; bpm: number }[] = (r.heart_rate ?? []).sort((a: any, b: any) => a.t - b.t);
+  const pulsoEn = (t: number): number | undefined => {
+    if (!hr.length) return undefined;
+    let lo = 0, hi = hr.length - 1;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (hr[m].t < t) lo = m + 1; else hi = m; }
+    const c = [hr[lo], hr[lo - 1]].filter(Boolean).sort((a, b) => Math.abs(a.t - t) - Math.abs(b.t - t))[0];
+    return Math.abs(c.t - t) <= 180 ? Math.round(c.bpm) : undefined;
+  };
+  let acum = 0;
+  const filas = pts.map((p, i) => {
+    if (i > 0) acum += metros(pts[i - 1], p);
+    return { t: p[0], lat: p[1], lon: p[2], alt: p[3] ?? undefined, km: Math.round(acum) / 1000, hr: pulsoEn(p[0]) };
+  });
+  // parciales por kilómetro
+  const parciales: Json[] = [];
+  let ini = 0;
+  for (let i = 1; i < filas.length; i++) {
+    if (Math.floor(filas[i].km) > Math.floor(filas[ini].km) || i === filas.length - 1) {
+      const tramo = filas.slice(ini, i + 1);
+      let sube = 0, baja = 0;
+      for (let k = 1; k < tramo.length; k++) {
+        const d = (tramo[k].alt ?? 0) - (tramo[k - 1].alt ?? 0);
+        if (tramo[k].alt != null && tramo[k - 1].alt != null) { if (d > 0) sube += d; else baja -= d; }
+      }
+      const hrs = tramo.map((f) => f.hr).filter((v): v is number => v != null);
+      parciales.push({
+        km: parciales.length + 1, segundos: filas[i].t - filas[ini].t,
+        sube_m: Math.round(sube), baja_m: Math.round(baja),
+        hr_media: hrs.length ? Math.round(hrs.reduce((a, b) => a + b, 0) / hrs.length) : undefined,
+      });
+      ini = i;
+    }
+  }
+  const paso = Math.max(1, Math.ceil(filas.length / maxPoints));
+  const reducido = filas.filter((_, i) => i % paso === 0 || i === filas.length - 1);
+  return {
+    id: r.id, date: r.date, start: r.start, end: r.end, activity: r.activity, source: r.source, name: r.name ?? undefined,
+    distance_m: r.distance_m, elevation_gain_m: r.elevation_gain_m, duration_s: pts.length ? pts[pts.length - 1][0] - pts[0][0] : 0,
+    session: r.session ?? undefined, heart_rate_samples: hr.length,
+    splits_km: parciales,
+    points: conPuntos ? reducido : undefined,
+    points_note: conPuntos ? `${reducido.length} de ${filas.length} puntos; t = segundos desde el inicio` : undefined,
+  };
+}
 
 class ToolError extends Error {}
 
@@ -201,6 +289,19 @@ async function callTool(store: DurableObjectStub<HealthStore>, name: string, arg
         order: args["newest_first"] === true ? "desc" : "asc",
       });
       return { type, count: rows.length, records: rows.map((r) => compact(r)) };
+    }
+
+    case "list_routes": {
+      const from = dateArg(args, "start_date");
+      const to = dateArg(args, "end_date");
+      return { routes: JSON.parse(await store.listRoutes(from, to)) };
+    }
+
+    case "get_route": {
+      const id = str(args, "id")!;
+      const r = JSON.parse(await store.getRoute(id));
+      if (!r) throw new ToolError(`No existe la ruta ${id}`);
+      return detalleRuta(r, Math.min(3000, Math.max(20, num(args, "max_points") ?? 300)), args["include_points"] !== false);
     }
 
     default:
